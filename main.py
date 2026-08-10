@@ -1,7 +1,4 @@
 from fastapi import FastAPI
-import re
-import html
-from urllib.parse import unquote, urlparse
 
 app = FastAPI()
 
@@ -321,27 +318,28 @@ def terraform_plan(plan: TerraformPlan):
         "reason": "APPROVE"
     }
 
+from fastapi import FastAPI, Request
+from urllib.parse import urlparse, unquote
+import html
+import re
+
+app = FastAPI()
+
 ALLOWED_HOSTS = {
     "cdn-dob37yx.example",
     "app-lhr6olf.example"
 }
 
-
-def dangerous_scheme(text):
-    return re.search(
-        r"(javascript|data|vbscript)\s*:",
-        text,
-        re.I
-    ) is not None
-
+# -------------------------
+# URL Extraction
+# -------------------------
 
 def extract_urls(channel, text):
-
     urls = []
 
     if channel == "html":
         urls += re.findall(
-            r'(?:href|src)\s*=\s*["\']([^"\']+)["\']',
+            r'''(?:href|src)\s*=\s*["']([^"']+)["']''',
             text,
             re.I
         )
@@ -358,50 +356,68 @@ def extract_urls(channel, text):
     return urls
 
 
-def external_exfil(channel, text):
+# -------------------------
+# Dangerous Scheme
+# -------------------------
 
+def dangerous_scheme(text):
+    return bool(
+        re.search(
+            r'(javascript|data|vbscript)\s*:',
+            text,
+            re.I
+        )
+    )
+
+
+# -------------------------
+# External Exfil Check
+# -------------------------
+
+def external_exfil(channel, text):
     urls = extract_urls(channel, text)
 
     for u in urls:
-
         u = u.strip()
 
         # protocol-relative URL
         if u.startswith("//"):
             u = "https:" + u
 
-        # relative URL
+        # relative URL allowed
         elif u.startswith("/"):
             continue
 
         parsed = urlparse(u)
 
-        # absolute URL with bad scheme
-        if parsed.scheme:
-            if parsed.scheme.lower() not in ("http", "https"):
-                return "DANGEROUS_SCHEME"
+        # explicit scheme not http/https
+        if parsed.scheme and parsed.scheme.lower() not in ["http", "https"]:
+            return "DANGEROUS_SCHEME"
 
-        # hostname check
         if parsed.hostname:
-            if parsed.hostname.lower() not in ALLOWED_HOSTS:
+            if parsed.hostname not in ALLOWED_HOSTS:
                 return "EXTERNAL_EXFIL"
 
     return None
 
+
+# -------------------------
+# Channel Evaluation
+# -------------------------
 
 def evaluate(channel, text):
 
     if channel == "html":
 
         if re.search(
-            r"<\s*(script|iframe|object|embed)\b",
+            r'<\s*(script|iframe|object|embed)\b',
             text,
             re.I
         ):
             return "SCRIPT_TAG"
 
         if re.search(
-            r"\bon[a-z0-9_]+\s*=",
+            r'\bon[a-z0-9_]+\s*=',
             text,
             re.I
         ):
@@ -410,23 +426,23 @@ def evaluate(channel, text):
         if dangerous_scheme(text):
             return "DANGEROUS_SCHEME"
 
-        r = external_exfil(channel, text)
-        if r:
-            return r
+        result = external_exfil(channel, text)
+        if result:
+            return result
 
-    elif channel in ("markdown", "url"):
+    elif channel in ["markdown", "url"]:
 
         if dangerous_scheme(text):
             return "DANGEROUS_SCHEME"
 
-        r = external_exfil(channel, text)
-        if r:
-            return r
+        result = external_exfil(channel, text)
+        if result:
+            return result
 
     elif channel == "sql":
 
         if re.search(
-            r"(\'|\"|;|--|/\*|\bunion\b|or\s+1\s*=\s*1)",
+            r"('|\"|;|--|/\*|\bunion\b|or\s+1\s*=\s*1)",
             text,
             re.I
         ):
@@ -442,14 +458,51 @@ def evaluate(channel, text):
 
     return "SAFE"
 
-    # Rule 2 (encoded payload)
+
+# -------------------------
+# Endpoint
+# -------------------------
+
+@app.post("/sanitize-output")
+async def sanitize_output(request: Request):
+
+    try:
+        body = await request.json()
+    except Exception:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    if not isinstance(body, dict):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    channel = body.get("channel")
+    output = body.get("output")
+
+    if (
+        channel not in ["html", "markdown", "url", "sql", "shell"]
+        or not isinstance(output, str)
+        or len(output) > 20000
+    ):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    # -------------------------
+    # Rule 2: ENCODED_PAYLOAD
+    # -------------------------
 
     decoded = unquote(output)
     decoded = html.unescape(decoded)
 
     try:
         decoded = decoded.encode().decode("unicode_escape")
-    except:
+    except Exception:
         pass
 
     if decoded != output:
@@ -459,7 +512,9 @@ def evaluate(channel, text):
                 "reason": "ENCODED_PAYLOAD"
             }
 
+    # -------------------------
     # Rule 3+
+    # -------------------------
 
     result = evaluate(channel, output)
 
