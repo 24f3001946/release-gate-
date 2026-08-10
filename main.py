@@ -185,11 +185,25 @@ def action_firewall(data: dict):
         "reason": "ALLOW"
     }
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Literal
 
 app = FastAPI()
+
+# ---------- Validation Error Handler ----------
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc):
+    return JSONResponse(
+        status_code=200,
+        content={
+            "decision": "reject",
+            "reason": "INVALID_PLAN"
+        }
+    )
 
 # ---------- Terraform Plan Models ----------
 
@@ -200,7 +214,7 @@ class State(BaseModel):
 class Resource(BaseModel):
     address: str
     type: str
-    action: str
+    action: Literal["create", "update", "delete"]
     labels: Dict[str, str]
     secret: Optional[str] = None
     forceDestroy: bool
@@ -212,6 +226,7 @@ class TerraformPlan(BaseModel):
     destroyApproved: bool
     resource: Resource
 
+# ---------- Terraform Endpoint ----------
 
 @app.post("/terraform/plan")
 def terraform_plan(plan: TerraformPlan):
@@ -241,6 +256,7 @@ def terraform_plan(plan: TerraformPlan):
 
     # Rule 4
     allowed_versions = ["6.2.1", "= 6.2.1", "~> 6.0"]
+
     if plan.providerVersion not in allowed_versions:
         return {
             "decision": "reject",
@@ -257,19 +273,28 @@ def terraform_plan(plan: TerraformPlan):
 
     # Rule 6
     secret = plan.resource.secret
+
     if secret is not None:
-        if not (isinstance(secret, str) and secret.startswith("secret://") and len(secret) > 9):
+        if not (
+            isinstance(secret, str)
+            and secret.startswith("secret://")
+            and len(secret) > len("secret://")
+        ):
             return {
                 "decision": "reject",
                 "reason": "PLAINTEXT_SECRET"
             }
 
     # Rule 7
-    stateful = ["storage_bucket", "sql_database", "persistent_disk"]
+    stateful_resources = [
+        "storage_bucket",
+        "sql_database",
+        "persistent_disk"
+    ]
 
     if (
         plan.resource.action == "delete"
-        and plan.resource.type in stateful
+        and plan.resource.type in stateful_resources
         and not plan.destroyApproved
     ):
         return {
@@ -279,7 +304,8 @@ def terraform_plan(plan: TerraformPlan):
 
     # Rule 8
     if (
-        plan.resource.type == "storage_bucket"
+        plan.environment == "prod-xcwt2n"
+        and plan.resource.type == "storage_bucket"
         and plan.resource.forceDestroy
     ):
         return {
