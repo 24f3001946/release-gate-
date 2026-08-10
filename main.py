@@ -554,3 +554,177 @@ async def sanitize_output(request: Request):
         "safe": False,
         "reason": result
     }
+
+from fastapi import Request
+from datetime import datetime, timezone
+
+VALID_TYPES = {"dns", "ct_log", "registry", "archive", "scan"}
+
+def parse_ts(ts):
+    try:
+        return datetime.fromisoformat(
+            ts.replace("Z", "+00:00")
+        )
+    except:
+        return None
+
+
+@app.post("/corroborate")
+async def corroborate(request: Request):
+
+    # Rule 1: invalid
+    try:
+        body = await request.json()
+    except:
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    if not isinstance(body, dict):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    claim = body.get("claim")
+    as_of = body.get("asOf")
+    staleness = body.get("stalenessDays")
+    sources = body.get("sources")
+
+    if not isinstance(claim, dict):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    if not isinstance(claim.get("value"), str):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    if not isinstance(sources, list):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    if not isinstance(staleness, (int, float)):
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    as_of_dt = parse_ts(as_of)
+    if as_of_dt is None:
+        return {
+            "verdict": "invalid",
+            "confidence": "low",
+            "corroboratingSources": []
+        }
+
+    claim_value = claim["value"]
+
+    fresh_valid = []
+
+    for s in sources:
+
+        if not isinstance(s, dict):
+            continue
+
+        if s.get("type") not in VALID_TYPES:
+            continue
+
+        if not all(
+            isinstance(s.get(k), str)
+            for k in ["id", "origin", "value", "observedAt"]
+        ):
+            continue
+
+        observed = parse_ts(s["observedAt"])
+        if observed is None:
+            continue
+
+        age_days = (
+            as_of_dt - observed
+        ).total_seconds() / 86400
+
+        if age_days < 0:
+            continue
+
+        if age_days > staleness:
+            continue
+
+        fresh_valid.append(s)
+
+    # Rule 2: contradicted
+    contradicting = sorted(
+        s["id"]
+        for s in fresh_valid
+        if s.get("authoritative") is True
+        and s["value"] != claim_value
+    )
+
+    if contradicting:
+        return {
+            "verdict": "contradicted",
+            "confidence": "low",
+            "corroboratingSources": contradicting
+        }
+
+    # Rule 3: supported
+    matching = [
+        s for s in fresh_valid
+        if s["value"] == claim_value
+    ]
+
+    by_origin = {}
+
+    for s in matching:
+        origin = s["origin"]
+
+        if (
+            origin not in by_origin
+            or s["id"] < by_origin[origin]["id"]
+        ):
+            by_origin[origin] = s
+
+    reps = list(by_origin.values())
+
+    if len(reps) >= 2:
+
+        ids = sorted(
+            r["id"]
+            for r in reps
+        )
+
+        types = {
+            r["type"]
+            for r in reps
+        }
+
+        confidence = (
+            "high"
+            if len(types) >= 2
+            else "medium"
+        )
+
+        return {
+            "verdict": "supported",
+            "confidence": confidence,
+            "corroboratingSources": ids
+        }
+
+    # Rule 4
+    return {
+        "verdict": "unverified",
+        "confidence": "low",
+        "corroboratingSources": []
+    }
