@@ -185,13 +185,11 @@ def action_firewall(data: dict):
         "reason": "ALLOW"
     }
 
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Literal
-
-app = FastAPI()
 
 # ---------- Validation Error Handler ----------
 
@@ -318,12 +316,10 @@ def terraform_plan(plan: TerraformPlan):
         "reason": "APPROVE"
     }
 
-from fastapi import FastAPI, Request
+from fastapi import Request
 from urllib.parse import urlparse, unquote
 import html
 import re
-
-app = FastAPI()
 
 ALLOWED_HOSTS = {
     "cdn-dob37yx.example",
