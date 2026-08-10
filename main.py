@@ -321,126 +321,137 @@ def terraform_plan(plan: TerraformPlan):
         "reason": "APPROVE"
     }
 
+from pydantic import BaseModel
+
+class SanitizeRequest(BaseModel):
+    channel: str
+    output: str
+
+@app.post("/sanitize-output")
+def sanitize_output(body: SanitizeRequest):
+    channel = body.channel
+    output = body.output
+    
 ALLOWED_HOSTS = {
     "cdn-dob37yx.example",
     "app-lhr6olf.example"
 }
 
-@app.post("/sanitize-output")
-def sanitize_output(body: dict):
 
-    # Rule 1
-    if not isinstance(body, dict):
-        return {"safe": False, "reason": "INVALID_SCHEMA"}
+def dangerous_scheme(text):
+    return re.search(
+        r"(javascript|data|vbscript)\s*:",
+        text,
+        re.I
+    ) is not None
 
-    channel = body.get("channel")
-    output = body.get("output")
 
-    if channel not in ["html", "markdown", "url", "sql", "shell"]:
-        return {"safe": False, "reason": "INVALID_SCHEMA"}
+def extract_urls(channel, text):
 
-    if not isinstance(output, str):
-        return {"safe": False, "reason": "INVALID_SCHEMA"}
+    urls = []
 
-    if len(output) > 20000:
-        return {"safe": False, "reason": "INVALID_SCHEMA"}
-
-    # ---------- helpers ----------
-
-    def dangerous_scheme(text):
-        return re.search(
-            r"(javascript|data|vbscript)\s*:",
+    if channel == "html":
+        urls += re.findall(
+            r'(?:href|src)\s*=\s*["\']([^"\']+)["\']',
             text,
             re.I
-        ) is not None
+        )
 
-    def extract_urls(ch, text):
-        urls = []
+    elif channel == "markdown":
+        urls += re.findall(
+            r'\]\(([^)]+)\)',
+            text
+        )
 
-        if ch == "html":
-            urls += re.findall(
-                r'''(?:href|src)\s*=\s*["']([^"']+)["']''',
-                text,
-                re.I
-            )
+    elif channel == "url":
+        urls.append(text.strip())
 
-        elif ch == "markdown":
-            urls += re.findall(r'\]\((.*?)\)', text)
+    return urls
 
-        elif ch == "url":
-            urls.append(text.strip())
 
-        return urls
+def external_exfil(channel, text):
 
-    def external_exfil(ch, text):
-        urls = extract_urls(ch, text)
+    urls = extract_urls(channel, text)
 
-        for u in urls:
+    for u in urls:
 
-            if u.startswith("/"):
-                continue
+        u = u.strip()
 
-            if u.startswith("//"):
-                u = "https:" + u
+        # protocol-relative URL
+        if u.startswith("//"):
+            u = "https:" + u
 
-            p = urlparse(u)
+        # relative URL
+        elif u.startswith("/"):
+            continue
 
-            if p.scheme and p.scheme not in ["http", "https"]:
+        parsed = urlparse(u)
+
+        # absolute URL with bad scheme
+        if parsed.scheme:
+            if parsed.scheme.lower() not in ("http", "https"):
                 return "DANGEROUS_SCHEME"
 
-            if p.hostname and p.hostname not in ALLOWED_HOSTS:
+        # hostname check
+        if parsed.hostname:
+            if parsed.hostname.lower() not in ALLOWED_HOSTS:
                 return "EXTERNAL_EXFIL"
 
-        return None
+    return None
 
-    def evaluate(ch, text):
 
-        if ch == "html":
+def evaluate(channel, text):
 
-            if re.search(
-                r"<\s*(script|iframe|object|embed)\b",
-                text,
-                re.I
-            ):
-                return "SCRIPT_TAG"
+    if channel == "html":
 
-            if re.search(r"\bon\w+\s*=", text, re.I):
-                return "EVENT_HANDLER"
+        if re.search(
+            r"<\s*(script|iframe|object|embed)\b",
+            text,
+            re.I
+        ):
+            return "SCRIPT_TAG"
 
-            if dangerous_scheme(text):
-                return "DANGEROUS_SCHEME"
+        if re.search(
+            r"\bon[a-z0-9_]+\s*=",
+            text,
+            re.I
+        ):
+            return "EVENT_HANDLER"
 
-            x = external_exfil(ch, text)
-            if x:
-                return x
+        if dangerous_scheme(text):
+            return "DANGEROUS_SCHEME"
 
-        elif ch in ["markdown", "url"]:
+        r = external_exfil(channel, text)
+        if r:
+            return r
 
-            if dangerous_scheme(text):
-                return "DANGEROUS_SCHEME"
+    elif channel in ("markdown", "url"):
 
-            x = external_exfil(ch, text)
-            if x:
-                return x
+        if dangerous_scheme(text):
+            return "DANGEROUS_SCHEME"
 
-        elif ch == "sql":
+        r = external_exfil(channel, text)
+        if r:
+            return r
 
-            if re.search(
-                r"('|\;|\"|--|/\*|\bunion\b|or\s+1\s*=\s*1)",
-                text,
-                re.I
-            ):
-                return "SQL_METACHAR"
+    elif channel == "sql":
 
-        elif ch == "shell":
+        if re.search(
+            r"(\'|\"|;|--|/\*|\bunion\b|or\s+1\s*=\s*1)",
+            text,
+            re.I
+        ):
+            return "SQL_METACHAR"
 
-            if re.search(
-                r"(;|&|\||`|<|>|\$\(|\$\{)",
-                text
-            ):
-                return "SHELL_METACHAR"
+    elif channel == "shell":
 
-        return "SAFE"
+        if re.search(
+            r"(;|&|\||`|<|>|\$\(|\$\{)",
+            text
+        ):
+            return "SHELL_METACHAR"
+
+    return "SAFE"
 
     # Rule 2 (encoded payload)
 
