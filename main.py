@@ -1,4 +1,7 @@
 from fastapi import FastAPI
+import re
+import html
+from urllib.parse import unquote, urlparse
 
 app = FastAPI()
 
@@ -316,4 +319,157 @@ def terraform_plan(plan: TerraformPlan):
     return {
         "decision": "approve",
         "reason": "APPROVE"
+    }
+
+ALLOWED_HOSTS = {
+    "cdn-dob37yx.example",
+    "app-lhr6olf.example"
+}
+
+@app.post("/sanitize-output")
+def sanitize_output(body: dict):
+
+    # Rule 1
+    if not isinstance(body, dict):
+        return {"safe": False, "reason": "INVALID_SCHEMA"}
+
+    channel = body.get("channel")
+    output = body.get("output")
+
+    if channel not in ["html", "markdown", "url", "sql", "shell"]:
+        return {"safe": False, "reason": "INVALID_SCHEMA"}
+
+    if not isinstance(output, str):
+        return {"safe": False, "reason": "INVALID_SCHEMA"}
+
+    if len(output) > 20000:
+        return {"safe": False, "reason": "INVALID_SCHEMA"}
+
+    # ---------- helpers ----------
+
+    def dangerous_scheme(text):
+        return re.search(
+            r"(javascript|data|vbscript)\s*:",
+            text,
+            re.I
+        ) is not None
+
+    def extract_urls(ch, text):
+        urls = []
+
+        if ch == "html":
+            urls += re.findall(
+                r'''(?:href|src)\s*=\s*["']([^"']+)["']''',
+                text,
+                re.I
+            )
+
+        elif ch == "markdown":
+            urls += re.findall(r'\]\((.*?)\)', text)
+
+        elif ch == "url":
+            urls.append(text.strip())
+
+        return urls
+
+    def external_exfil(ch, text):
+        urls = extract_urls(ch, text)
+
+        for u in urls:
+
+            if u.startswith("/"):
+                continue
+
+            if u.startswith("//"):
+                u = "https:" + u
+
+            p = urlparse(u)
+
+            if p.scheme and p.scheme not in ["http", "https"]:
+                return "DANGEROUS_SCHEME"
+
+            if p.hostname and p.hostname not in ALLOWED_HOSTS:
+                return "EXTERNAL_EXFIL"
+
+        return None
+
+    def evaluate(ch, text):
+
+        if ch == "html":
+
+            if re.search(
+                r"<\s*(script|iframe|object|embed)\b",
+                text,
+                re.I
+            ):
+                return "SCRIPT_TAG"
+
+            if re.search(r"\bon\w+\s*=", text, re.I):
+                return "EVENT_HANDLER"
+
+            if dangerous_scheme(text):
+                return "DANGEROUS_SCHEME"
+
+            x = external_exfil(ch, text)
+            if x:
+                return x
+
+        elif ch in ["markdown", "url"]:
+
+            if dangerous_scheme(text):
+                return "DANGEROUS_SCHEME"
+
+            x = external_exfil(ch, text)
+            if x:
+                return x
+
+        elif ch == "sql":
+
+            if re.search(
+                r"('|\;|\"|--|/\*|\bunion\b|or\s+1\s*=\s*1)",
+                text,
+                re.I
+            ):
+                return "SQL_METACHAR"
+
+        elif ch == "shell":
+
+            if re.search(
+                r"(;|&|\||`|<|>|\$\(|\$\{)",
+                text
+            ):
+                return "SHELL_METACHAR"
+
+        return "SAFE"
+
+    # Rule 2 (encoded payload)
+
+    decoded = unquote(output)
+    decoded = html.unescape(decoded)
+
+    try:
+        decoded = decoded.encode().decode("unicode_escape")
+    except:
+        pass
+
+    if decoded != output:
+        if evaluate(channel, decoded) != "SAFE":
+            return {
+                "safe": False,
+                "reason": "ENCODED_PAYLOAD"
+            }
+
+    # Rule 3+
+
+    result = evaluate(channel, output)
+
+    if result == "SAFE":
+        return {
+            "safe": True,
+            "reason": "SAFE"
+        }
+
+    return {
+        "safe": False,
+        "reason": result
     }
