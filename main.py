@@ -321,17 +321,6 @@ def terraform_plan(plan: TerraformPlan):
         "reason": "APPROVE"
     }
 
-from pydantic import BaseModel
-
-class SanitizeRequest(BaseModel):
-    channel: str
-    output: str
-
-@app.post("/sanitize-output")
-def sanitize_output(body: SanitizeRequest):
-    channel = body.channel
-    output = body.output
-    
 ALLOWED_HOSTS = {
     "cdn-dob37yx.example",
     "app-lhr6olf.example"
