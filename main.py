@@ -463,6 +463,8 @@ def evaluate(channel, text):
 # Endpoint
 # -------------------------
 
+from fastapi import Request
+
 @app.post("/sanitize-output")
 async def sanitize_output(request: Request):
 
@@ -480,19 +482,43 @@ async def sanitize_output(request: Request):
             "reason": "INVALID_SCHEMA"
         }
 
-    channel = body.get("channel")
-    output = body.get("output")
-
-    if (
-        channel not in ["html", "markdown", "url", "sql", "shell"]
-        or not isinstance(output, str)
-        or len(output) > 20000
-    ):
+    if "channel" not in body or "output" not in body:
         return {
             "safe": False,
             "reason": "INVALID_SCHEMA"
         }
 
+    channel = body.get("channel")
+    output = body.get("output")
+
+    if not isinstance(channel, str):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    if not isinstance(output, str):
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    if channel not in ["html", "markdown", "url", "sql", "shell"]:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    if len(output) > 20000:
+        return {
+            "safe": False,
+            "reason": "INVALID_SCHEMA"
+        }
+
+    # KEEP all your existing logic below
+    # encoded payload check
+    # evaluate(channel, output)
+    # SAFE response
     # -------------------------
     # Rule 2: ENCODED_PAYLOAD
     # -------------------------
