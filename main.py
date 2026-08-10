@@ -184,3 +184,110 @@ def action_firewall(data: dict):
         "decision": "allow",
         "reason": "ALLOW"
     }
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+
+app = FastAPI()
+
+# ---------- Terraform Plan Models ----------
+
+class State(BaseModel):
+    backend: str
+    locked: bool
+
+class Resource(BaseModel):
+    address: str
+    type: str
+    action: str
+    labels: Dict[str, str]
+    secret: Optional[str] = None
+    forceDestroy: bool
+
+class TerraformPlan(BaseModel):
+    environment: str
+    state: State
+    providerVersion: str
+    destroyApproved: bool
+    resource: Resource
+
+
+@app.post("/terraform/plan")
+def terraform_plan(plan: TerraformPlan):
+
+    required_labels = {
+        "owner": "student-lph2m",
+        "environment": "production",
+        "cost_center": "cc-4soi"
+    }
+
+    # Rule 2
+    if plan.environment != "prod-xcwt2n":
+        return {
+            "decision": "reject",
+            "reason": "ENVIRONMENT_MISMATCH"
+        }
+
+    # Rule 3
+    if (
+        plan.state.backend not in ["gcs", "s3", "azurerm", "remote"]
+        or plan.state.locked is not True
+    ):
+        return {
+            "decision": "reject",
+            "reason": "STATE_UNSAFE"
+        }
+
+    # Rule 4
+    allowed_versions = ["6.2.1", "= 6.2.1", "~> 6.0"]
+    if plan.providerVersion not in allowed_versions:
+        return {
+            "decision": "reject",
+            "reason": "UNPINNED_PROVIDER"
+        }
+
+    # Rule 5
+    for k, v in required_labels.items():
+        if plan.resource.labels.get(k) != v:
+            return {
+                "decision": "reject",
+                "reason": "MISSING_LABELS"
+            }
+
+    # Rule 6
+    secret = plan.resource.secret
+    if secret is not None:
+        if not (isinstance(secret, str) and secret.startswith("secret://") and len(secret) > 9):
+            return {
+                "decision": "reject",
+                "reason": "PLAINTEXT_SECRET"
+            }
+
+    # Rule 7
+    stateful = ["storage_bucket", "sql_database", "persistent_disk"]
+
+    if (
+        plan.resource.action == "delete"
+        and plan.resource.type in stateful
+        and not plan.destroyApproved
+    ):
+        return {
+            "decision": "reject",
+            "reason": "DELETE_NOT_APPROVED"
+        }
+
+    # Rule 8
+    if (
+        plan.resource.type == "storage_bucket"
+        and plan.resource.forceDestroy
+    ):
+        return {
+            "decision": "reject",
+            "reason": "FORCE_DESTROY"
+        }
+
+    return {
+        "decision": "approve",
+        "reason": "APPROVE"
+    }
